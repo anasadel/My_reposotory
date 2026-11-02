@@ -15,7 +15,7 @@ npm start
 
 Open http://127.0.0.1:5173 in Chrome or Edge, then click **Choose local folder** and pick `VaultCache\FabLibrary` or a downloaded package folder.
 
-## Connect Unreal (for "Send selected FBX")
+## Connect Unreal
 
 In your Unreal project:
 
@@ -23,6 +23,15 @@ In your Unreal project:
 2. **Project Settings > Plugins > Remote Control**: turn on **Allow Remote Python Execution**.
 
 Asset Shelf checks for the editor every 5 seconds. When it's connected, the inspector shows the project name.
+
+## Unreal assets from Fab
+
+Choose your `VaultCache` folder (or one pack's `data\Content` folder). Every `.uasset` and `.umap` is listed, grouped by type: Meshes, Materials, Textures, Blueprints, Animation, Effects, Audio and Maps.
+
+- **Add to project** copies the selected asset and every asset it uses (materials, textures, skeletons, and so on) into your project's `Content` folder, at the same `/Game/...` path Fab uses so references keep working. Files already in the project are never overwritten.
+- **Load 3D from Unreal** (meshes only) asks Unreal to export the mesh so it can be rotated in 3D. Files copied only for the preview are deleted again afterwards. The preview shows geometry, not materials.
+
+Unreal assets only open in the Unreal version they were made for, or newer.
 
 ## Files
 

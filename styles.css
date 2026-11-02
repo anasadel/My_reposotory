@@ -167,3 +167,14 @@ kbd { font-size: 11px; border: 1px solid var(--line); border-radius: 4px; paddin
   .layout { grid-template-columns: 240px minmax(0, 1fr) 330px; }
   .search-box { width: 220px; }
 }
+
+/* Unreal asset type filter */
+.type-filter { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
+.type-chip { border: 1px solid var(--line); background: var(--panel-2); color: var(--muted); border-radius: 12px; padding: 2px 9px; font-size: 11px; cursor: pointer; }
+.type-chip span { opacity: 0.7; margin-left: 2px; }
+.type-chip:hover { color: var(--text); }
+.type-chip.active { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+
+.load-unreal-3d { position: absolute; top: 10px; right: 10px; border: 0; border-radius: 6px; padding: 6px 10px; font-size: 12px; background: var(--accent); color: #fff; cursor: pointer; }
+.load-unreal-3d:disabled { background: #2a323d; color: var(--muted); cursor: not-allowed; }
+.ue-destination-fixed { display: block; padding: 7px 10px; word-break: break-all; }

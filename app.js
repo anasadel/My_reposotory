@@ -14,7 +14,15 @@ const inspector = document.getElementById("inspector");
 const toast = document.getElementById("toast");
 const sortButton = document.getElementById("sortButton");
 const supportedExtensions = new Set(["fbx", "obj", "gltf", "glb", "usd", "usdz"]);
-const unrealModelFolderNames = new Set(["mesh", "meshes", "models", "staticmesh", "staticmeshes", "skeletalmesh", "skeletalmeshes", "geometry"]);
+const unrealAssetExtensions = new Set(["uasset", "umap"]);
+const unrealContentExtensions = new Set(["uasset", "umap", "uexp", "ubulk", "uptnl"]);
+const unrealTypeOrder = ["All", "Meshes", "Materials", "Textures", "Blueprints", "Animation", "Effects", "Audio", "Maps", "Other"];
+const galleryLimit = 300;
+// Unreal files by content root + path inside Content, used to find dependencies.
+let unrealContentFiles = new Map();
+let galleryTypeFilter = "All";
+let unrealPreviewCache = new Map();
+let unrealProgressText = "";
 const tagsStorageKey = "assetShelfPrototype.tags.v1";
 let packages = [];
 let localFilesByPath = new Map();
@@ -50,7 +58,7 @@ folderInput.addEventListener("change", async function () {
     return { file: file, path: normalizePath(file.webkitRelativePath || file.name) };
   });
   const rootName = entries[0].path.split("/")[0] || "selected folder";
-  await scanSelectedFolder(entries, rootName);
+  await scanSelectedFolder(entries, rootName, true);
 });
 searchInput.addEventListener("input", renderLibrary);
 sortButton.addEventListener("click", function () {
@@ -151,7 +159,7 @@ async function readAndScanDirectory(directory) {
   const entries = [];
   folderStatus.textContent = "Reading " + directory.name + " locally…";
   await collectDirectoryFiles(directory, "", entries);
-  await scanSelectedFolder(entries, directory.name);
+  await scanSelectedFolder(entries, directory.name, false);
 }
 
 function openDirectoryDatabase() {
@@ -231,10 +239,17 @@ async function collectDirectoryFiles(directory, relativePath, output) {
   }
 }
 
-async function scanSelectedFolder(fileEntries, rootName) {
+async function scanSelectedFolder(fileEntries, rootName, pathsIncludeRoot) {
   libraryScanGeneration += 1;
   thumbnailMissingTexturesByKey.clear();
   thumbnailPendingKeys.clear();
+  unrealPreviewCache.clear();
+  unrealContentFiles = new Map();
+  fileEntries.forEach(function (entry) {
+    if (!unrealContentExtensions.has(extensionOf(entry.file.name))) return;
+    const location = getUnrealContentLocation(normalizePath(entry.path).split("/"), rootName, pathsIncludeRoot);
+    unrealContentFiles.set(location.prefix + "|" + location.relative.toLowerCase(), { file: entry.file, relative: location.relative });
+  });
   const files = fileEntries.map(function (entry) { return entry.file; });
   folderStatus.textContent = "Scanning " + files.length.toLocaleString() + " local files…";
   showToast("Scanning local files…");
@@ -253,24 +268,25 @@ async function scanSelectedFolder(fileEntries, rootName) {
     const path = normalizePath(fileEntry.path);
     const segments = path.split("/");
     const extension = extensionOf(file.name);
-    const unrealModelFolderIndex = extension === "uasset" ? findUnrealModelFolderIndex(segments) : -1;
-    if (unrealModelFolderIndex >= 0 && !/_FoliageType\.uasset$/i.test(file.name)) {
-      const contentIndex = segments.findIndex(function (part) { return part.toLowerCase() === "content"; });
-      const packageParts = contentIndex >= 0 ? segments.slice(contentIndex + 1, unrealModelFolderIndex) : segments.slice(0, unrealModelFolderIndex);
-      if (!packageParts.length) packageParts.push(rootName || "Unreal cache");
-      const cachePrefix = contentIndex > 0 ? segments.slice(0, contentIndex).join("/") + "/" : "";
-      const packageKey = cachePrefix + packageParts.join("/");
-      const packageName = packageParts[packageParts.length - 1];
-      const assetKey = packageKey + "|UNREAL|" + segments.slice(unrealModelFolderIndex + 1).join("/");
+    if (unrealAssetExtensions.has(extension)) {
+      // Every Unreal asset belongs to the pack folder directly under Content.
+      const location = getUnrealContentLocation(segments, rootName, pathsIncludeRoot);
+      const relativeParts = location.relative.split("/");
+      const packFolder = relativeParts.length > 1 ? relativeParts[0] : (rootName || "Unreal content");
+      const packageKey = location.prefix + packFolder;
+      const assetKey = packageKey + "|UNREAL|" + location.relative;
       let record = packageMap.get(packageKey);
       if (!record) {
-        record = { key: packageKey, folderName: packageName, title: prettifyName(packageName), creator: "Unreal cache", formats: new Map(), assets: [], thumbnail: null, metadata: {} };
+        record = { key: packageKey, folderName: packFolder, title: prettifyName(packFolder), creator: "Unreal content", formats: new Map(), assets: [], thumbnail: null, metadata: {} };
         packageMap.set(packageKey, record);
       }
       record.assets.push({
         key: assetKey, name: file.name, path: path, format: "UNREAL",
-        extension: "UASSET", size: file.size, file: file,
-        tags: tagMap[assetKey] || [], isUnrealPackageAsset: true
+        extension: extension.toUpperCase(), size: file.size, file: file,
+        tags: tagMap[assetKey] || [], isUnrealPackageAsset: true,
+        unrealType: getUnrealAssetType(file.name, relativeParts),
+        contentPrefix: location.prefix, contentRelative: location.relative,
+        gamePath: "/Game/" + location.relative.replace(/\.(uasset|umap)$/i, "")
       });
       if (!record.formats.has("UNREAL")) record.formats.set("UNREAL", { metadataFile: null, thumbnailFile: null });
       continue;
@@ -311,6 +327,7 @@ async function scanSelectedFolder(fileEntries, rootName) {
 
   packages = Array.from(packageMap.values());
   for (const record of packages) {
+    if (record.formats.has("UNREAL")) record.assets.sort(function (a, b) { return a.name.localeCompare(b.name); });
     const firstFormat = record.formats.values().next().value;
     if (firstFormat && firstFormat.thumbnailFile) record.thumbnail = URL.createObjectURL(firstFormat.thumbnailFile);
     for (const formatRecord of record.formats.values()) {
@@ -352,15 +369,64 @@ async function scanSelectedFolder(fileEntries, rootName) {
     emptyState.querySelector("p").textContent = "Choose your Fab library or one downloaded package. Asset Shelf scans the files locally and shows the individual models inside.";
     emptyState.querySelector(".empty-hint").textContent = "Choose either VaultCache\\FabLibrary or the downloaded package folder itself.";
   }
-  selectedPackageKey = packages[0] ? packages[0].key : "";
-  selectedAssetKey = packages[0] && packages[0].assets[0] ? packages[0].assets[0].key : "";
+  selectPackage(packages[0] || null);
   renderLibrary();
   renderInspector();
   showToast(packages.length + " packages found · " + countAssets(packages) + " individual assets");
 }
 
-function findUnrealModelFolderIndex(segments) {
-  return segments.findIndex(function (part) { return unrealModelFolderNames.has(part.toLowerCase()); });
+// Splits a file path into the part before the Unreal Content folder (prefix)
+// and the path inside Content (relative), e.g. "Pack/Meshes/SM_Rock.uasset".
+function getUnrealContentLocation(segments, rootName, pathsIncludeRoot) {
+  const contentIndex = segments.findIndex(function (part) { return part.toLowerCase() === "content"; });
+  if (contentIndex >= 0) {
+    return { prefix: contentIndex > 0 ? segments.slice(0, contentIndex).join("/") + "/" : "", relative: segments.slice(contentIndex + 1).join("/") };
+  }
+  // No Content folder in the path: the chosen folder is a pack folder inside Content.
+  const parts = pathsIncludeRoot ? segments.slice(1) : segments.slice();
+  return { prefix: "", relative: [rootName || "Pack"].concat(parts).join("/") };
+}
+
+function getUnrealAssetType(fileName, relativeParts) {
+  if (/\.umap$/i.test(fileName)) return "Maps";
+  const name = fileName.replace(/\.uasset$/i, "").toLowerCase();
+  if (/_(skeleton|physicsasset|physics)$/.test(name)) return "Animation";
+  if (/_foliagetype$/.test(name)) return "Other";
+  const prefixRules = [
+    [/^(sm|sk|skm|mesh)_/, "Meshes"],
+    [/^(m|mi|mic|mf|ml|mpc|mat)_/, "Materials"],
+    [/^(t|tx|tex|hdr|hdri|rt)_/, "Textures"],
+    [/^(bp|wbp|bpi)_/, "Blueprints"],
+    [/^(abp|am|as|a|anim|bs|skel|pa|phys|ik|rtg)_/, "Animation"],
+    [/^(ns|ne|fx|p|pfx|vfx)_/, "Effects"],
+    [/^(s|sw|sc|cue|sfx|snd|mus|att)_/, "Audio"]
+  ];
+  for (const rule of prefixRules) if (rule[0].test(name)) return rule[1];
+  const folderRules = [
+    [/^(mesh|meshes|models?|staticmesh(es)?|skeletalmesh(es)?|geometry)$/, "Meshes"],
+    [/^(materials?|materialinstances?|materialfunctions?)$/, "Materials"],
+    [/^textures?$/, "Textures"],
+    [/^blueprints?$/, "Blueprints"],
+    [/^(anims?|animations?|skeletons?|rigs?)$/, "Animation"],
+    [/^(fx|vfx|particles|niagara|effects)$/, "Effects"],
+    [/^(audio|sounds?|sfx|music)$/, "Audio"],
+    [/^(maps?|levels?)$/, "Maps"]
+  ];
+  const folders = relativeParts.slice(0, -1).reverse();
+  for (const folder of folders) {
+    const lower = folder.toLowerCase().replace(/[\s_-]/g, "");
+    for (const rule of folderRules) if (rule[0].test(lower)) return rule[1];
+  }
+  return "Other";
+}
+
+// Selects a package and its first mesh (or first asset).
+function selectPackage(record) {
+  selectedPackageKey = record ? record.key : "";
+  const hasMeshes = !!record && record.assets.some(function (asset) { return asset.unrealType === "Meshes"; });
+  galleryTypeFilter = hasMeshes ? "Meshes" : "All";
+  const first = record ? (record.assets.find(function (asset) { return !hasMeshes || asset.unrealType === "Meshes"; }) || record.assets[0]) : null;
+  selectedAssetKey = first ? first.key : "";
 }
 
 function normalizePath(path) {
@@ -426,9 +492,8 @@ function renderLibrary() {
   packageCount.textContent = String(packages.length);
   packageGrid.querySelectorAll(".package-card").forEach(function (card) {
     card.addEventListener("click", function () {
-      selectedPackageKey = card.dataset.package || "";
-      const record = getSelectedPackage();
-      selectedAssetKey = record && record.assets[0] ? record.assets[0].key : "";
+      const key = card.dataset.package || "";
+      if (key !== selectedPackageKey) selectPackage(packages.find(function (record) { return record.key === key; }) || null);
       renderLibrary();
       renderInspector();
     });
@@ -458,9 +523,27 @@ function renderInspector() {
   }
   const asset = record.assets.find(function (item) { return item.key === selectedAssetKey; }) || record.assets[0];
   if (asset) selectedAssetKey = asset.key;
-  const isUnrealPreview = !!(asset && asset.isUnrealPackageAsset);
+  const isUnrealAsset = !!(asset && asset.isUnrealPackageAsset);
+  const unrealMeshFbx = isUnrealAsset ? unrealPreviewCache.get(asset.key) : null;
+  // Unreal assets show their saved thumbnail until Unreal has exported the mesh for 3D.
+  const showThumbnail = isUnrealAsset && !unrealMeshFbx;
+  const canLoadUnreal3d = showThumbnail && asset.unrealType === "Meshes";
   const selectedThumbnail = asset ? thumbnailDataByKey.get(asset.key) || "" : "";
-  const cards = record.assets.map(function (item) {
+
+  const typeCounts = new Map();
+  record.assets.forEach(function (item) {
+    if (item.unrealType) typeCounts.set(item.unrealType, (typeCounts.get(item.unrealType) || 0) + 1);
+  });
+  if (galleryTypeFilter !== "All" && !typeCounts.has(galleryTypeFilter)) galleryTypeFilter = "All";
+  const typeChips = typeCounts.size ? '<div class="type-filter">' + unrealTypeOrder.filter(function (type) { return type === "All" || typeCounts.has(type); }).map(function (type) {
+    const count = type === "All" ? record.assets.length : typeCounts.get(type);
+    return '<button type="button" class="type-chip' + (type === galleryTypeFilter ? " active" : "") + '" data-type="' + type + '">' + type + ' <span>' + count + '</span></button>';
+  }).join("") + '</div>' : "";
+  const galleryAssets = record.assets.filter(function (item) { return galleryTypeFilter === "All" || item.unrealType === galleryTypeFilter; });
+  const shownAssets = galleryAssets.slice(0, galleryLimit);
+  const galleryNote = galleryAssets.length > shownAssets.length ? "Showing " + shownAssets.length + " of " + galleryAssets.length : "Select an asset to inspect";
+
+  const cards = shownAssets.map(function (item) {
     const selected = asset && item.key === asset.key ? " selected" : "";
     const thumbnail = thumbnailDataByKey.get(item.key) || "";
     const imageAlt = item.isUnrealPackageAsset ? "Saved Unreal thumbnail for " : "3D preview of ";
@@ -470,30 +553,46 @@ function renderInspector() {
       '<span class="asset-card-visual">' + image + '<span class="asset-card-placeholder">' + escapeHtml(item.extension) + '</span>' +
       '<span class="asset-card-preview-status">' + previewLabel + '</span></span>' +
       '<span class="asset-card-body"><span class="asset-card-name">' + escapeHtml(item.name) + '</span>' +
-      '<span class="asset-card-meta">' + escapeHtml(item.format) + ' · ' + formatSize(item.size) + '</span></span></button>';
+      '<span class="asset-card-meta">' + escapeHtml(item.unrealType || item.format) + ' · ' + formatSize(item.size) + '</span></span></button>';
   }).join("");
   const tags = asset ? asset.tags || [] : [];
   const tagChips = tags.map(function (tag) {
     return '<span class="tag-chip" data-remove-tag="' + escapeHtml(tag) + '" title="Remove tag">' + escapeHtml(tag) + ' ×</span>';
   }).join("");
+
+  let previewHtml;
+  if (showThumbnail) {
+    previewHtml = (selectedThumbnail ? '<img id="unrealAssetPreview" class="unreal-asset-preview-image" src="' + selectedThumbnail + '" alt="Saved Unreal thumbnail for ' + escapeHtml(asset.name) + '">' : '<img id="unrealAssetPreview" class="unreal-asset-preview-image" alt="" hidden>') +
+      '<div class="model-preview-status" id="modelPreviewStatus" role="status">' + (selectedThumbnail ? "Saved Unreal thumbnail · static preview" : "Reading embedded Unreal thumbnail…") + '</div>' +
+      (canLoadUnreal3d ? '<button class="load-unreal-3d" id="loadUnreal3d" type="button">Load 3D from Unreal</button>' : "");
+  } else {
+    previewHtml = '<canvas id="modelCanvas" aria-label="3D preview of selected asset"></canvas>' +
+      '<div class="model-preview-status" id="modelPreviewStatus" role="status">Loading ' + escapeHtml(asset ? asset.name : "model") + '…</div>' +
+      '<button class="model-preview-reset" id="resetModelView" type="button" aria-label="Reset model view" title="Reset view">↺</button>';
+  }
+
+  const sendHtml = isUnrealAsset
+    ? '<div class="ue-next"><strong>Add to Unreal project</strong><p id="unrealStatus">Checking for the Unreal Editor…</p>' +
+      '<div class="ue-destination-label">Goes to (fixed, so its references keep working)</div><code class="ue-destination-fixed">' + escapeHtml(asset.gamePath) + '</code>' +
+      '<button type="button" id="sendSelectedButton" disabled>Add to project</button></div>'
+    : '<div class="ue-next"><strong>Send one asset to Unreal</strong><p id="unrealStatus">Checking for the Unreal Editor…</p>' +
+      '<label class="ue-destination-label" for="unrealDestination">Unreal Content folder</label><input id="unrealDestination" class="ue-destination" type="text" value="/Game/AssetShelf" spellcheck="false">' +
+      '<button type="button" id="sendSelectedButton" disabled>Send selected FBX</button></div>';
+
   inspector.innerHTML = '<div class="inspector-content">' +
     '<div class="inspector-topline"><span class="eyebrow">PACKAGE INSPECTOR</span><span class="source-badge">LOCAL CACHE</span></div>' +
     '<h3 class="inspector-title">' + escapeHtml(record.title) + '</h3>' +
-    '<div class="inspector-creator">In package: ' + escapeHtml(record.title) + ' · ' + escapeHtml(asset ? asset.format : "") + '</div>' +
-    '<div class="metadata-row"><span class="meta-pill">' + record.assets.length + (record.assets.length === 1 ? " source file" : " source files") + '</span>' +
+    '<div class="inspector-creator">In package: ' + escapeHtml(record.title) + ' · ' + escapeHtml(asset ? asset.unrealType || asset.format : "") + '</div>' +
+    '<div class="metadata-row"><span class="meta-pill">' + record.assets.length + (record.assets.length === 1 ? " file" : " files") + '</span>' +
     '<span class="meta-pill">' + escapeHtml(uniqueFormats(record).join(", ") || "Unknown format") + '</span></div>' +
-    '<div class="section-heading"><h4>Package contents</h4><span>Select a model to inspect</span></div><div class="asset-gallery">' + cards + '</div>' +
-    '<div class="section-heading selected-preview-heading"><h4>' + (isUnrealPreview ? "Selected Unreal thumbnail" : "Selected model") + '</h4><span>' + (isUnrealPreview ? "Saved thumbnail · static view" : "Drag to orbit · scroll to zoom") + '</span></div>' +
-    '<div class="model-preview" id="modelPreview">' + (isUnrealPreview ? (selectedThumbnail ? '<img id="unrealAssetPreview" class="unreal-asset-preview-image" src="' + selectedThumbnail + '" alt="Saved Unreal thumbnail for ' + escapeHtml(asset.name) + '">' : '<img id="unrealAssetPreview" class="unreal-asset-preview-image" alt="" hidden>') : '<canvas id="modelCanvas" aria-label="3D preview of selected asset"></canvas>') +
-    '<div class="model-preview-status" id="modelPreviewStatus" role="status">' + (isUnrealPreview ? (selectedThumbnail ? "Saved Unreal thumbnail · static preview" : "Reading embedded Unreal thumbnail…") : "Loading " + escapeHtml(asset ? asset.name : "model") + "…") + '</div>' +
-    '<button class="model-preview-reset" id="resetModelView" type="button" aria-label="Reset model view" title="Reset view"' + (isUnrealPreview ? " hidden" : "") + '>↺</button></div>' +
+    '<div class="section-heading"><h4>Package contents</h4><span>' + galleryNote + '</span></div>' + typeChips + '<div class="asset-gallery">' + cards + '</div>' +
+    '<div class="section-heading selected-preview-heading"><h4>' + (showThumbnail ? "Selected Unreal asset" : "Selected model") + '</h4><span>' + (showThumbnail ? "Saved thumbnail · static view" : "Drag to orbit · scroll to zoom") + '</span></div>' +
+    '<div class="model-preview" id="modelPreview">' + previewHtml + '</div>' +
     '<h3 class="inspector-title selected-asset-title">' + escapeHtml(asset ? asset.name : record.title) + '</h3>' +
     '<div class="section-heading"><h4>Tags for selected file</h4><span>Saved on this computer</span></div>' +
     '<div class="tag-editor"><input id="tagInput" type="text" maxlength="32" placeholder="Add a tag, e.g. zombie"><button id="addTagButton" type="button" aria-label="Add tag">＋</button></div>' +
     '<div class="asset-tags">' + tagChips + '</div><div class="tag-help">Press Enter or + to add. Click a tag to remove it.</div>' +
-    '<div class="ue-next"><strong>Send one asset to Unreal</strong><p id="unrealStatus">Checking for the Unreal Editor bridge…</p>' +
-    '<label class="ue-destination-label" for="unrealDestination">Unreal Content folder</label><input id="unrealDestination" class="ue-destination" type="text" value="/Game/AssetShelf" spellcheck="false">' +
-    '<button type="button" id="sendSelectedButton" disabled>Send selected FBX</button></div></div>';
+    sendHtml + '</div>';
 
   inspector.querySelectorAll(".asset-card").forEach(function (button) {
     button.addEventListener("click", function () {
@@ -502,14 +601,23 @@ function renderInspector() {
       renderInspector();
     });
   });
+  inspector.querySelectorAll(".type-chip").forEach(function (button) {
+    button.addEventListener("click", function () {
+      galleryTypeFilter = button.dataset.type || "All";
+      renderInspector();
+    });
+  });
   loadVisibleAssetThumbnails(record);
   const canvas = document.getElementById("modelCanvas");
   const previewStatus = document.getElementById("modelPreviewStatus");
   const resetPreviewButton = document.getElementById("resetModelView");
-  if (canvas && asset && !isUnrealPreview && window.AssetShelfPreview && typeof window.AssetShelfPreview.createModelPreview === "function") {
+  const previewAsset = unrealMeshFbx || asset;
+  if (canvas && previewAsset && window.AssetShelfPreview && typeof window.AssetShelfPreview.createModelPreview === "function") {
     try {
       selectedModelPreview = window.AssetShelfPreview.createModelPreview(canvas, previewStatus);
-      selectedModelPreview.load(asset, localFilesByPath).catch(function (error) {
+      selectedModelPreview.load(previewAsset, unrealMeshFbx ? new Map() : localFilesByPath).then(function () {
+        if (unrealMeshFbx && previewStatus) previewStatus.textContent = "Mesh exported by Unreal · geometry only";
+      }).catch(function (error) {
         console.warn("Asset Shelf model preview failed:", error);
       });
       resetPreviewButton.addEventListener("click", function () {
@@ -518,9 +626,11 @@ function renderInspector() {
     } catch (error) {
       if (previewStatus) previewStatus.textContent = error && error.message ? error.message : "3D preview could not start.";
     }
-  } else if (previewStatus && !isUnrealPreview) {
+  } else if (canvas && previewStatus) {
     previewStatus.textContent = "3D preview engine is unavailable. Reload the local page to retry.";
   }
+  const load3dButton = document.getElementById("loadUnreal3d");
+  if (load3dButton) load3dButton.addEventListener("click", function () { void loadUnrealMeshIn3d(asset); });
   const addButton = document.getElementById("addTagButton");
   const tagInput = document.getElementById("tagInput");
   addButton.addEventListener("click", addCurrentTag);
@@ -558,6 +668,11 @@ function loadVisibleAssetThumbnails(record) {
       if (result.missingTextures) thumbnailMissingTexturesByKey.add(key);
       else thumbnailMissingTexturesByKey.delete(key);
       thumbnailPendingKeys.delete(key);
+      // Unreal packs have no cover image, so use the first mesh thumbnail.
+      if (item.isUnrealPackageAsset && !record.thumbnail && item.unrealType === "Meshes") {
+        record.thumbnail = result.image;
+        renderLibrary();
+      }
       if (item.isUnrealPackageAsset && key === selectedAssetKey) {
         const selectedImage = document.getElementById("unrealAssetPreview");
         const selectedStatus = document.getElementById("modelPreviewStatus");
@@ -624,12 +739,23 @@ function loadVisibleAssetThumbnails(record) {
 
 async function extractEmbeddedUnrealThumbnail(file) {
   if (!file || typeof file.arrayBuffer !== "function") throw new Error("The Unreal asset file cannot be read.");
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let start = -1;
-  for (let index = 0; index < bytes.length - 2; index += 1) {
-    if (bytes[index] === 0xff && bytes[index + 1] === 0xd8 && bytes[index + 2] === 0xff) { start = index; break; }
-  }
+  // The thumbnail sits in the file header, so read only the start of large files.
+  const headerBytes = 8 * 1024 * 1024;
+  let bytes = new Uint8Array(await file.slice(0, headerBytes).arrayBuffer());
+  if (file.size > headerBytes && findJpegStart(bytes) < 0) bytes = new Uint8Array(await file.arrayBuffer());
+  const start = findJpegStart(bytes);
   if (start < 0) throw new Error("This Unreal asset has no embedded JPEG thumbnail.");
+  return await jpegBytesToDataUrl(bytes, start);
+}
+
+function findJpegStart(bytes) {
+  for (let index = 0; index < bytes.length - 2; index += 1) {
+    if (bytes[index] === 0xff && bytes[index + 1] === 0xd8 && bytes[index + 2] === 0xff) return index;
+  }
+  return -1;
+}
+
+async function jpegBytesToDataUrl(bytes, start) {
   let end = -1;
   for (let index = start + 3; index < bytes.length - 1; index += 1) {
     if (bytes[index] === 0xff && bytes[index + 1] === 0xd9) { end = index + 1; break; }
@@ -670,29 +796,47 @@ async function refreshUnrealStatus() {
 function updateUnrealControls() {
   const status = document.getElementById("unrealStatus");
   const button = document.getElementById("sendSelectedButton");
+  const load3dButton = document.getElementById("loadUnreal3d");
+  if (load3dButton) {
+    load3dButton.disabled = isSendingToUnreal || !unrealBridge.connected;
+    load3dButton.textContent = isSendingToUnreal ? "Working…" : "Load 3D from Unreal";
+    load3dButton.title = unrealBridge.connected ? "Unreal exports this mesh so it can be shown in 3D" : "Open Unreal Editor to load this mesh in 3D";
+  }
   if (!status || !button) return;
   const asset = getSelectedAsset();
+  const isUnreal = !!asset && !!asset.isUnrealPackageAsset;
   const isFbx = !!asset && asset.extension.toLowerCase() === "fbx";
-  if (isSendingToUnreal) status.textContent = "Sending " + (asset ? asset.name : "asset") + " to Unreal…";
-  else if (asset && asset.isUnrealPackageAsset) status.textContent = "Unreal cache thumbnails are preview-only here. The current handoff sends FBX files.";
-  else if (unrealBridge.connected) status.textContent = "Connected to " + unrealBridge.projectName + (unrealBridge.engineVersion ? " · " + unrealBridge.engineVersion : "") + ". Only the selected FBX is sent.";
+  if (isSendingToUnreal) status.textContent = unrealProgressText || "Working with Unreal…";
   else if (unrealBridge.localServerRequired) status.textContent = "Run Asset Shelf with npm start, then open its local address to connect Unreal.";
-  else status.textContent = "Open Unreal Editor with the Asset Shelf Bridge enabled to send the selected FBX.";
-  button.disabled = isSendingToUnreal || !unrealBridge.connected || !isFbx;
-  button.textContent = isSendingToUnreal ? "Sending…" : "Send selected FBX";
+  else if (!unrealBridge.connected) status.textContent = "Open Unreal Editor with Remote Control and Python enabled (see README) to send assets.";
+  else if (isUnreal) status.textContent = "Connected to " + unrealBridge.projectName + ". Copies this asset and the files it uses into your project. Existing files are never overwritten.";
+  else if (isFbx) status.textContent = "Connected to " + unrealBridge.projectName + (unrealBridge.engineVersion ? " · " + unrealBridge.engineVersion : "") + ". Only the selected FBX is sent.";
+  else status.textContent = "Connected to " + unrealBridge.projectName + ". Only FBX files and Unreal assets can be sent.";
+  button.disabled = isSendingToUnreal || !unrealBridge.connected || !(isUnreal || isFbx);
+  button.textContent = isSendingToUnreal ? "Working…" : (isUnreal ? "Add to project" : "Send selected FBX");
+}
+
+function setUnrealProgress(text) {
+  unrealProgressText = text;
+  updateUnrealControls();
 }
 
 async function sendSelectedAssetToUnreal() {
   const asset = getSelectedAsset();
+  if (!asset || isSendingToUnreal) return;
+  if (asset.isUnrealPackageAsset) {
+    await addUnrealAssetToProject(asset);
+    return;
+  }
   const destinationInput = document.getElementById("unrealDestination");
-  if (!asset || !asset.file || asset.extension.toLowerCase() !== "fbx" || !destinationInput) return;
+  if (!asset.file || asset.extension.toLowerCase() !== "fbx" || !destinationInput) return;
   const destination = destinationInput.value.trim();
   if (!destination) {
     showToast("Enter an Unreal Content folder, such as /Game/AssetShelf.");
     return;
   }
   isSendingToUnreal = true;
-  updateUnrealControls();
+  setUnrealProgress("Sending " + asset.name + " to Unreal…");
   try {
     const response = await fetch("/api/unreal/import?filename=" + encodeURIComponent(asset.name) + "&destination=" + encodeURIComponent(destination), {
       method: "POST",
@@ -706,7 +850,142 @@ async function sendSelectedAssetToUnreal() {
     showToast(error && error.message ? error.message : "Could not send this asset to Unreal.");
   } finally {
     isSendingToUnreal = false;
-    updateUnrealControls();
+    setUnrealProgress("");
+  }
+}
+
+// Finds the /Game/... packages an Unreal asset refers to. Package paths are
+// stored as plain text in the file header, so a text scan finds them.
+async function readUnrealReferences(file) {
+  const limit = 8 * 1024 * 1024;
+  const buffer = await (file.size > limit ? file.slice(0, limit) : file).arrayBuffer();
+  const text = new TextDecoder("latin1").decode(buffer);
+  const references = new Set();
+  for (const match of text.matchAll(/\/Game\/[A-Za-z0-9_\-\/ ]+/g)) {
+    const path = match[0].replace(/[\/ ]+$/, "");
+    if (path.length > 6) references.add(path);
+  }
+  return references;
+}
+
+// Collects the asset plus every asset it depends on, with their companion files.
+async function collectUnrealDependencies(asset) {
+  const packagesFound = [];
+  const missing = [];
+  const seen = new Set();
+  const queue = [asset.gamePath];
+  while (queue.length) {
+    const gamePath = queue.shift();
+    const lowerPath = gamePath.toLowerCase();
+    if (seen.has(lowerPath)) continue;
+    seen.add(lowerPath);
+    const base = gamePath.slice("/Game/".length);
+    const main = ["uasset", "umap"].map(function (extension) {
+      return unrealContentFiles.get(asset.contentPrefix + "|" + (base + "." + extension).toLowerCase());
+    }).find(Boolean);
+    if (!main) {
+      missing.push(gamePath);
+      continue;
+    }
+    const files = [main].concat(["uexp", "ubulk", "uptnl"].map(function (extension) {
+      return unrealContentFiles.get(asset.contentPrefix + "|" + (base + "." + extension).toLowerCase());
+    }).filter(Boolean));
+    packagesFound.push({ gamePath: gamePath, files: files });
+    if (packagesFound.length > 5000) throw new Error("This asset references too many files.");
+    setUnrealProgress("Finding files used by " + asset.name + "… (" + packagesFound.length + ")");
+    (await readUnrealReferences(main.file)).forEach(function (reference) {
+      if (!seen.has(reference.toLowerCase())) queue.push(reference);
+    });
+  }
+  return { packages: packagesFound, missing: missing };
+}
+
+// Copies an asset and its dependencies into the project's Content folder.
+// Returns the packages that were newly written (not already in the project).
+async function copyUnrealAssetFiles(asset) {
+  const dependencies = await collectUnrealDependencies(asset);
+  const total = dependencies.packages.reduce(function (sum, item) { return sum + item.files.length; }, 0);
+  const newPackages = [];
+  let copied = 0;
+  let skipped = 0;
+  for (const item of dependencies.packages) {
+    let isNew = false;
+    for (const entry of item.files) {
+      setUnrealProgress("Copying file " + (copied + skipped + 1) + " of " + total + "…");
+      const response = await fetch("/api/unreal/content?path=" + encodeURIComponent(entry.relative), {
+        method: "PUT",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: entry.file
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.error || "Could not copy " + entry.relative);
+      if (result.written) { copied += 1; if (entry === item.files[0]) isNew = true; } else skipped += 1;
+    }
+    if (isNew) newPackages.push(item.gamePath);
+  }
+  return { packages: dependencies.packages.map(function (item) { return item.gamePath; }), newPackages: newPackages, missing: dependencies.missing, copied: copied, skipped: skipped };
+}
+
+async function postJson(url, body) {
+  const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const type = response.headers.get("Content-Type") || "";
+  if (type.includes("application/json")) {
+    const result = await response.json();
+    if (!response.ok || !result.success) throw new Error(result.error || "Unreal could not finish this step.");
+    return result;
+  }
+  if (!response.ok) throw new Error("Unreal could not finish this step.");
+  return response;
+}
+
+async function addUnrealAssetToProject(asset) {
+  isSendingToUnreal = true;
+  setUnrealProgress("Finding files used by " + asset.name + "…");
+  try {
+    const result = await copyUnrealAssetFiles(asset);
+    setUnrealProgress("Asking Unreal to load the new files…");
+    await postJson("/api/unreal/content/register", { packages: result.packages, select: asset.gamePath });
+    let message = "Added " + asset.name + " · " + result.copied + " files copied";
+    if (result.skipped) message += ", " + result.skipped + " already in project";
+    if (result.missing.length) message += " · " + result.missing.length + " referenced assets not in this download";
+    showToast(message);
+    if (result.missing.length) console.info("Asset Shelf: referenced assets not found in the download:", result.missing);
+  } catch (error) {
+    showToast(error && error.message ? error.message : "Could not add this asset to Unreal.");
+  } finally {
+    isSendingToUnreal = false;
+    setUnrealProgress("");
+  }
+}
+
+// Unreal exports the mesh as FBX so the browser can show it in 3D.
+// Files copied only for this preview are removed from the project afterwards.
+async function loadUnrealMeshIn3d(asset) {
+  if (!asset || isSendingToUnreal) return;
+  isSendingToUnreal = true;
+  const status = document.getElementById("modelPreviewStatus");
+  const showStatus = function (text) {
+    setUnrealProgress(text);
+    if (status && asset.key === selectedAssetKey) status.textContent = text;
+  };
+  try {
+    showStatus("Finding files used by " + asset.name + "…");
+    const copy = await copyUnrealAssetFiles(asset);
+    showStatus("Unreal is exporting the mesh… (first time can take a while)");
+    const response = await postJson("/api/unreal/preview", { package: asset.gamePath, packages: copy.packages, cleanup: copy.newPackages });
+    const blob = await response.blob();
+    const leftover = Number(response.headers.get("X-Asset-Shelf-Leftover") || 0);
+    const name = asset.name.replace(/\.(uasset|umap)$/i, "") + ".fbx";
+    unrealPreviewCache.set(asset.key, { name: name, extension: "FBX", path: name, size: blob.size, file: new File([blob], name) });
+    if (leftover) showToast(leftover + " preview files could not be removed from your project.");
+    if (asset.key === selectedAssetKey) renderInspector();
+  } catch (error) {
+    const message = error && error.message ? error.message : "Could not load this mesh from Unreal.";
+    if (status && asset.key === selectedAssetKey) status.textContent = message;
+    showToast(message);
+  } finally {
+    isSendingToUnreal = false;
+    setUnrealProgress("");
   }
 }
 
