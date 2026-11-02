@@ -1,0 +1,10 @@
+{
+  "scripts": {
+    "build:preview": "esbuild preview-viewer.js --bundle --format=iife --global-name=AssetShelfPreview --outfile=preview-viewer.bundle.js",
+    "start": "node server.js"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "three": "0.187.0"
+  }
+}

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Asset Shelf — Package Inspector</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">A</div>
+        <div><div class="brand-name">ASSET SHELF</div><div class="brand-subtitle">Unreal asset library</div></div>
+      </div>
+      <div class="topbar-note"><span class="live-dot"></span> Local library</div>
+    </header>
+    <main class="layout">
+      <aside class="sidebar">
+        <section class="source-card">
+          <div class="eyebrow">LIBRARY SOURCE</div>
+          <h1>Browse packages<br>before importing.</h1>
+          <p>Open your Fab library or a single package folder. Your files stay on this computer.</p>
+          <button id="chooseFolder" class="button button-primary" type="button"><span aria-hidden="true">＋</span> Choose local folder</button>
+          <input id="folderInput" type="file" webkitdirectory multiple hidden>
+          <div id="folderStatus" class="folder-status">No folder selected</div>
+          <button id="reconnectFolder" class="button button-outline reconnect-folder" type="button" hidden>Reconnect saved folder</button>
+        </section>
+        <nav class="filters" aria-label="Asset filters">
+          <div class="eyebrow">BROWSE</div>
+          <button class="filter-button active" data-filter="all" type="button"><span class="filter-icon">▦</span><span>All packages</span><span id="packageCount" class="count">0</span></button>
+          <button class="filter-button" data-filter="characters" type="button"><span class="filter-icon">◉</span><span>Characters</span></button>
+          <button class="filter-button" data-filter="environment" type="button"><span class="filter-icon">⌂</span><span>Environment</span></button>
+          <button class="filter-button" data-filter="props" type="button"><span class="filter-icon">◇</span><span>Props</span></button>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="step-label">FIRST BUILD STEP</div>
+          <div class="step-title">Inspect package contents</div>
+          <div class="step-copy">Preview individual models inside a package before sending selected files to Unreal.</div>
+        </div>
+      </aside>
+      <section class="library">
+        <div class="library-heading">
+          <div><div class="eyebrow">YOUR LIBRARY</div><h2>Asset packages</h2></div>
+          <div class="library-tools">
+            <label class="search-box"><span aria-hidden="true">⌕</span><input id="searchInput" type="search" placeholder="Search name, creator, or tag" autocomplete="off"><kbd>Ctrl K</kbd></label>
+            <button id="sortButton" class="button button-quiet" type="button">A–Z <span>⌄</span></button>
+          </div>
+        </div>
+        <div id="emptyState" class="empty-state">
+          <div class="empty-art"><div class="cube cube-back"></div><div class="cube cube-front"></div><div class="cube cube-top"></div></div>
+          <h3>Choose your Fab library or package folder</h3>
+          <p>Choose your Fab library or one downloaded package. Asset Shelf scans the files locally and shows the individual models inside.</p>
+          <button class="button button-outline" id="emptyChoose" type="button">Choose local library folder</button>
+          <div class="empty-hint">Choose either <code>VaultCache\FabLibrary</code> or the downloaded package folder itself.</div>
+        </div>
+        <div id="libraryContent" class="library-content" hidden>
+          <div class="result-line"><span id="resultSummary">0 packages</span><span id="filterSummary" class="muted">Showing all packages</span></div>
+          <div id="packageGrid" class="package-grid"></div>
+          <div id="noResults" class="no-results" hidden>No packages match this search.</div>
+        </div>
+      </section>
+      <aside id="inspector" class="inspector">
+        <div class="inspector-empty"><div class="inspector-icon">◇</div><h3>Select a package</h3><p>Package details and individual files will appear here.</p></div>
+      </aside>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="preview-viewer.bundle.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
